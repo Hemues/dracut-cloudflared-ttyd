@@ -16,6 +16,7 @@ Entries marked ✅ are verified in production. Entries marked ⏳ are pending ve
 5. [Binary Fetch at Build Time vs Runtime](#5--binary-fetch-at-build-time-vs-runtime)
 6. [Fedora 44 Upgrade Breaks WiFi in Initramfs](#6--fedora-44-upgrade-breaks-wifi-in-initramfs)
 7. [Fedora 44 Kernel LVM Activation Regression After Switch-Root](#7--fedora-44-kernel-lvm-activation-regression-after-switch-root)
+8. [Intermittent Interface Naming in Initramfs Breaks NM Profile Matching](#8--intermittent-interface-naming-in-initramfs-breaks-nm-profile-matching)
 
 ---
 
@@ -233,3 +234,83 @@ the real systemd takes over, the post-switch_root activation bug is bypassed.
   (e.g., 90s) with `nofail` for non-critical mounts.
 - Failed boots with new kernels may not persist journal entries if /var/log is
   on a separate LV that itself failed to activate.
+
+---
+
+## #8 — Intermittent Interface Naming in Initramfs Breaks NM Profile Matching
+
+**Status:** ✅ VERIFIED (2026-07-23, Blathy-server, kernel 7.0.10-201.fc44, Intel ixgbe 10G)
+
+**Symptom:**
+Remote LUKS unlock intermittently unavailable after reboot. The module is fully
+included (cloudflared + ttyd start), but the Cloudflare tunnel never connects.
+`net-detect` logs, from the initrd phase:
+
+```
+net-detect: Found wired/other NM profile: ens6f0.nmconnection
+net-detect: Found VLAN NM profile: vlan-ens6f0.101.nmconnection
+net-detect: No default route found yet.
+net-detect: Wired interface eth0 present but no carrier.
+net-detect: Wired interface eth1 present but no carrier.
+net-detect: ERROR: Failed to establish a default route (internet access).
+```
+
+cloudflared then fails every DNS lookup and never reaches the edge. The *same*
+initramfs image had booted fine several times before ("Default route already
+active via 'ens6f0'"). The tell: on the failing boot the NIC is named **eth0 /
+eth1** (kernel defaults); on good boots it is **ens6f0** (predictable name).
+
+**Root Cause:**
+The NIC's predictable name `ens6f0` comes from `ID_NET_NAME_SLOT`, which depends
+on ACPI/PCI hotplug slot data. In the initramfs that data (or the udev rename
+itself) is occasionally not ready/applied in time, so `systemd-udevd` does not
+rename the device and the kernel default `eth0`/`eth1` sticks for that boot.
+`udevadm test-builtin net_setup_link` reproduces it: *"Policies didn't yield a
+name."*
+
+The copied NM profiles are name-bound: `ens6f0.nmconnection` has
+`interface-name=ens6f0`, and the VLAN profile's `parent=<uuid>` chains back to
+it. When the device comes up as `eth0`, **no profile matches**, NM never
+activates it (so the link stays down → "no carrier"), no default route appears,
+and `net-detect` exits 1. It is a boot-time race, hence intermittent (worked on
+4 prior boots, failed on the 5th with an unchanged image).
+
+**Fix:**
+Pin the physical NIC name by **MAC address** with a systemd `.link` file, which
+does not depend on the flaky slot/path data:
+
+```ini
+# /etc/systemd/network/10-<iface>.link  (host + auto-included in initramfs)
+[Match]
+MACAddress=8c:dc:d4:b7:33:7c
+
+[Link]
+Name=ens6f0
+```
+
+Two layers, both applied:
+1. **Host mitigation:** drop the `.link` in `/etc/systemd/network/` and
+   `dracut -f`. dracut auto-includes `/etc/systemd/network/*.link`, so it lands
+   in the initramfs; the full OS gets deterministic naming too. Verified with
+   `lsinitrd` and `udevadm test-builtin net_setup_link`.
+2. **Module fix (`module-setup.sh`, `_pin_copied_iface_names`):** for every
+   *physical* device (`/sys/class/net/<X>/device` exists) referenced by a copied
+   profile's `interface-name=<X>`, generate `71-dracut-cloudflared-ttyd-<X>.link`
+   pinning its MAC → name. Virtual devices (vlan/bond/bridge/team) are skipped —
+   they're created by NM by name. This makes every future rebuild self-healing
+   on any host, no manual `.link` needed.
+
+**Key Lessons:**
+- Predictable interface naming is **not guaranteed** in the initramfs — treat it
+  as best-effort. Anything bound to `interface-name=` can silently miss.
+- The distinguishing evidence between "no link/cable" and "naming race" is the
+  interface *name* in the `net-detect` log: `eth0`/`eth1` = rename didn't happen;
+  the real predictable name = a genuine link/route problem.
+- MAC-matched `.link` files are the deterministic fix; `MACAddress=` never
+  depends on ACPI/PCI slot enumeration timing.
+- `dracut` auto-includes `/etc/systemd/network/*.link` (confirmed by building a
+  throwaway image and inspecting with `lsinitrd`).
+- Separately noticed while debugging: the baked `cloudflared.service` used
+  `head` in its DNS-fixup `ExecStartPre`, but `head` is not in the initramfs
+  (`head: command not found`). The repo source already uses `sed -n` instead —
+  rebuild/reinstall the RPM so the deployed unit matches the source.

@@ -57,6 +57,28 @@ During `dracut -f`, the module inspects the host's routing table to find which i
 - For **VLAN** interfaces, the VLAN profile and its parent interface profile are included
 - If no default gateway is found (e.g., the system is offline during `dracut -f`), all non-WiFi profiles are copied as a fallback
 
+### Deterministic interface naming (build time)
+
+The copied NetworkManager profiles are bound to the interface name (e.g.
+`interface-name=ens6f0`, and VLAN/bond/bridge children chain back to it).
+Predictable interface naming is **not guaranteed** inside the initramfs — the
+slot/path policy occasionally fails to yield a name (especially for some NIC
+drivers), leaving the kernel default `eth0`/`eth1`, which would make those
+name-bound profiles silently fail to match (no link, no route, no tunnel).
+
+To prevent this, during `dracut -f` the module generates a systemd `.link` file
+(`/etc/systemd/network/71-dracut-cloudflared-ttyd-<iface>.link`) for every
+**physical** NIC referenced by a copied profile, pinning its **MAC address** to
+its expected name. MAC matching does not depend on the flaky slot/path data, so
+the NIC is named consistently on every boot. Virtual devices (VLAN/bond/bridge/
+team) are skipped — they are created by NetworkManager by name.
+
+> If you prefer an explicit pin (also stabilizes the name in the full OS), you
+> can add your own, e.g. `/etc/systemd/network/10-<iface>.link` with a
+> `[Match] MACAddress=` / `[Link] Name=` pair; dracut auto-includes
+> `/etc/systemd/network/*.link` into the initramfs. Verify with
+> `lsinitrd /boot/initramfs-$(uname -r).img | grep '\.link'`.
+
 ### Network detection (boot time)
 
 At boot inside the initramfs, a detection service runs before cloudflared:

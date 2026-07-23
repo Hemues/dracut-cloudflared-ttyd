@@ -15,6 +15,18 @@ This builds and packages a Fedora dracut module that brings up networking in ini
 - Read `LESSONS-LEARNED.md` before editing dracut modules, NetworkManager profile copying, LVM activation, or tunnel startup.
 - Packaging is RPM/spec driven; inspect `dist/` and the spec before changing release behavior.
 
+## Known Traps (see LESSONS-LEARNED.md)
+- **Interface naming is not guaranteed in the initramfs.** Copied NM profiles are
+  bound to `interface-name=`; if predictable naming flakes (NIC comes up as
+  `eth0`/`eth1` instead of e.g. `ens6f0`) the profiles silently don't match and
+  the tunnel never starts. `module-setup.sh` now pins physical NICs by MAC via a
+  generated `.link` (`_pin_copied_iface_names`) — keep it. When diagnosing "tunnel
+  didn't come up", check the interface *name* in the `net-detect` journal first
+  (LESSONS #8).
+- The deployed RPM can lag the repo source: the initramfs `cloudflared.service`
+  used `head` (absent from initramfs); repo source uses `sed -n`. Rebuild/reinstall
+  the RPM after source changes so the baked unit matches.
+
 ## Work Safely
 - Initramfs failures can make encrypted systems unbootable remotely. Keep rollback instructions current.
 - Never `rm -rf` a work tree that may contain bind mounts; verify nested mounts through `/proc/self/mounts` before cleanup.

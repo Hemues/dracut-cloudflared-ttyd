@@ -4,7 +4,7 @@
 %define _ttyd_version %( [ -x %{_sourcedir}/ttyd.x86_64 ] && %{_sourcedir}/ttyd.x86_64 --version 2>/dev/null | cut -d' ' -f3- | sed 's/-/_/g' || echo unknown )
 %define _cfd_version %( [ -x %{_sourcedir}/cloudflared-linux-amd64 ] && %{_sourcedir}/cloudflared-linux-amd64 version -s 2>/dev/null || echo unknown )
 Name:           dracut-cloudflared-ttyd
-Version:        0.0.4
+Version:        0.0.5
 Release:        %autorelease -b %{_builddate} -e ttyd_%{_ttyd_version}_cf_%{_cfd_version}
 Summary:        Creates configuration for dracut to include a web tty and cloudflared
 Group:          System
@@ -212,6 +212,13 @@ fi
 systemctl daemon-reload >/dev/null 2>&1 || true
 
 %changelog
+* Thu Jul 23 2026 Hemues <hemues@hemues.com> - 0.0.5
+- fix intermittent initramfs networking (remote unlock unavailable after some
+  reboots): pin physical NIC names by MAC via a generated systemd .link
+  (module-setup.sh _pin_copied_iface_names), so interface-name= bound NM profiles
+  and their VLAN/bond/bridge children still match when predictable naming
+  (slot/path) flakes and the NIC comes up as the kernel default eth0/eth1
+
 * Sun Mar 09 2026 Levente Tamas <levi@tamisoft.com> - 0.0.4
 - copy host NM connection profiles into initramfs (DHCP, static IP, VLAN, bond, bridge, WiFi)
 - automatic network detection: wired/WiFi fallback, VLAN parent resolution by UUID
